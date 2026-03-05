@@ -23,45 +23,51 @@ namespace Tomciz.RoadGenerator
         public void HandleMouseDrag()
         {
             if (IsDrawing)
-            {
-                if (_waitForRelease)
-                {
-                    if (Input.GetMouseButtonUp(0))
-                        _waitForRelease = false;
-                    return;
-                }
-                CurrentPosition = GetMouseWorldPosition();
-                if (Input.GetMouseButtonDown(0))
-                {
-                    if (IsPointerOverUI()) return;
-                    EndPosition = CurrentPosition;
-                    OnEndDrawing?.Invoke();
-                    StartPosition = EndPosition;
-                    _waitForRelease = true;
-                    OnStartDrawing?.Invoke();
-                }
-                else if (Input.GetMouseButtonDown(1))
-                {
-                    if (IsPointerOverUI()) return;
-                    EndPosition = CurrentPosition;
-                    IsDrawing = false;
-                    _waitForRelease = true;
-                    OnEndDrawing?.Invoke();
-                }
-            }
+                HandleWhileDrawing();
             else if (_waitForRelease)
+                ConsumeRelease();
+            else
+                TryStartStroke();
+        }
+
+        private void HandleWhileDrawing()
+        {
+            if (_waitForRelease)
             {
-                if (Input.GetMouseButtonUp(0) || Input.GetMouseButtonUp(1))
-                    _waitForRelease = false;
+                if (Input.GetMouseButtonUp(0)) _waitForRelease = false;
+                return;
             }
-            else if (Input.GetMouseButtonDown(0))
+            CurrentPosition = GetMouseWorldPosition();
+            if (Input.GetMouseButtonDown(0) && !IsPointerOverUI())
             {
-                if (IsPointerOverUI()) return;
-                StartPosition = CurrentPosition = GetMouseWorldPosition();
-                IsDrawing = true;
-                _waitForRelease = false;
+                EndPosition = CurrentPosition;
+                OnEndDrawing?.Invoke();
+                StartPosition = EndPosition;
+                _waitForRelease = true;
                 OnStartDrawing?.Invoke();
             }
+            else if (Input.GetMouseButtonDown(1) && !IsPointerOverUI())
+            {
+                EndPosition = CurrentPosition;
+                IsDrawing = false;
+                _waitForRelease = true;
+                OnEndDrawing?.Invoke();
+            }
+        }
+
+        private void ConsumeRelease()
+        {
+            if (Input.GetMouseButtonUp(0) || Input.GetMouseButtonUp(1))
+                _waitForRelease = false;
+        }
+
+        private void TryStartStroke()
+        {
+            if (!Input.GetMouseButtonDown(0) || IsPointerOverUI()) return;
+            StartPosition = CurrentPosition = GetMouseWorldPosition();
+            IsDrawing = true;
+            _waitForRelease = false;
+            OnStartDrawing?.Invoke();
         }
 
         private Vector3 GetMouseWorldPosition() =>

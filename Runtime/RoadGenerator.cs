@@ -7,14 +7,21 @@ namespace Tomciz.RoadGenerator
     [RequireComponent(typeof(LineRenderer))]
     public class RoadGenerator : MonoBehaviour
     {
+        [Header("Drawing")]
         [SerializeField] private LineRenderer _lineRenderer;
         [SerializeField, FormerlySerializedAs("_bezierSegmentsPerKnot")]
         private int _segmentsPerSpan = 16;
-        [SerializeField, Min(0.01f)] private float _roadWidth = 2f;
         [SerializeField, Min(0.01f)] private float _mergeDistance = 1f;
         [SerializeField, Min(0.01f)] private float _snapDistance = 1.5f;
+
+        [Header("Road Mesh")]
+        [SerializeField, Min(0.01f)] private float _roadWidth = 2f;
+        [Tooltip("World units per texture repeat along the road (lower = more repeats, no stretching).")]
+        [SerializeField, Min(0.01f)] private float _textureScaleAlong = 2f;
         [SerializeField] private MeshFilter _roadMeshFilter;
         [SerializeField] private MeshRenderer _roadMeshRenderer;
+        [Tooltip("Material used for the procedural road mesh. Assign your PBR road material here (e.g. pebbled asphalt).")]
+        [SerializeField] private Material _roadMaterial;
 
         private InputController _inputController;
         private RoadSpline _spline;
@@ -54,8 +61,16 @@ namespace Tomciz.RoadGenerator
             if (_roadMeshRenderer == null)
             {
                 _roadMeshRenderer = go.AddComponent<MeshRenderer>();
-                _roadMeshRenderer.sharedMaterial = new Material(Shader.Find("Sprites/Default")) { color = new Color(0.3f, 0.3f, 0.3f) };
+                ApplyRoadMaterial();
             }
+        }
+
+        private void ApplyRoadMaterial()
+        {
+            if (_roadMeshRenderer == null) return;
+            _roadMeshRenderer.sharedMaterial = _roadMaterial != null
+                ? _roadMaterial
+                : new Material(Shader.Find("Sprites/Default")) { color = new Color(0.3f, 0.3f, 0.3f) };
         }
 
         private void OnEnable()
@@ -127,54 +142,55 @@ namespace Tomciz.RoadGenerator
 
         private void OnEndDrawing()
         {
-            bool isStrokeEnd = !_inputController.IsDrawing;
-
-            if (isStrokeEnd)
+            if (!_inputController.IsDrawing)
             {
-                List<Vector3> path = _committedPositions ?? new List<Vector3>();
-
-                // Snap the last point to a nearby endpoint on another road
-                if (path.Count >= 2 &&
-                    RoadNetwork.FindNearestEndpoint(path[path.Count - 1], _snapDistance, GetInstanceID(), out var snapEnd))
-                {
-                    path[path.Count - 1] = snapEnd.EndpointPosition;
-                    TryBuildBridge(path, snapEnd);
-                }
-
-                // Also check start for bridge (the stroke start may have snapped)
-                if (path.Count >= 2 &&
-                    RoadNetwork.FindNearestEndpoint(path[0], _snapDistance, GetInstanceID(), out var snapStart))
-                {
-                    path[0] = snapStart.EndpointPosition;
-                    TryBuildBridge(path, snapStart);
-                }
-
-                RefreshRoadDisplay(path);
-                _persistedPath = path.Count >= 2 ? new List<Vector3>(path) : _persistedPath;
-
-                // Register in the network so other roads can snap to this one
-                if (_persistedPath != null && _persistedPath.Count >= 2)
-                    RoadNetwork.Register(this, _persistedPath, _roadWidth);
-
-                _roadKnots = null;
-                _segmentSmooth = null;
-                _committedPositions = null;
-                _strokeEnded = true;
+                FinishStroke();
                 return;
             }
+            CommitNewPoint();
+        }
 
+        private void FinishStroke()
+        {
+            List<Vector3> path = _committedPositions ?? new List<Vector3>();
+            ApplySnapToEndpoints(path);
+            RefreshRoadDisplay(path);
+            _persistedPath = path.Count >= 2 ? new List<Vector3>(path) : _persistedPath;
+            if (_persistedPath != null && _persistedPath.Count >= 2)
+                RoadNetwork.Register(this, _persistedPath, _roadWidth);
+            _roadKnots = null;
+            _segmentSmooth = null;
+            _committedPositions = null;
+            _strokeEnded = true;
+        }
+
+        private void ApplySnapToEndpoints(List<Vector3> path)
+        {
+            if (path.Count < 2) return;
+            int id = GetInstanceID();
+            if (RoadNetwork.FindNearestEndpoint(path[path.Count - 1], _snapDistance, id, out var snapEnd))
+            {
+                path[path.Count - 1] = snapEnd.EndpointPosition;
+                TryBuildBridge(path, snapEnd);
+            }
+            if (RoadNetwork.FindNearestEndpoint(path[0], _snapDistance, id, out var snapStart))
+            {
+                path[0] = snapStart.EndpointPosition;
+                TryBuildBridge(path, snapStart);
+            }
+        }
+
+        private void CommitNewPoint()
+        {
             _roadKnots ??= new List<Vector3>();
             _segmentSmooth ??= new List<bool>();
             _committedPositions ??= new List<Vector3>();
-
             _roadKnots.Add(_inputController.EndPosition);
             _segmentSmooth.Add(_useBezierCurve);
-
             int newSegIndex = _roadKnots.Count - 2;
             var segPositions = _spline.SampleSegment(_roadKnots, _segmentSmooth, newSegIndex);
             for (int i = 1; i < segPositions.Count; i++)
                 _committedPositions.Add(segPositions[i]);
-
             RefreshRoadDisplay(_committedPositions);
         }
 
@@ -246,44 +262,41 @@ namespace Tomciz.RoadGenerator
         {
             if (_roadMeshFilter == null)
                 return;
-            Mesh mesh = RoadMeshBuilder.Build(path, _roadWidth);
+            ApplyRoadMaterial();
+            Mesh mesh = RoadMeshBuilder.Build(path, _roadWidth, _textureScaleAlong);
             if (mesh != null)
                 _roadMeshFilter.mesh = mesh;
         }
 
-        /// <summary>
-        /// Creates a bridge mesh between this road's endpoint and the snapped road's endpoint.
-        /// </summary>
         private void TryBuildBridge(List<Vector3> path, RoadNetwork.SnapResult snap)
         {
-            // Determine tangent at our road's endpoint closest to the snap
-            Vector3 ourEnd;
-            Vector3 ourTangent;
-            float dStart = Vector3.Distance(path[0], snap.EndpointPosition);
-            float dEnd = Vector3.Distance(path[path.Count - 1], snap.EndpointPosition);
+            GetEndpointAndTangent(path, snap.EndpointPosition, out Vector3 ourEnd, out Vector3 ourTangent);
+            if (Vector3.Distance(ourEnd, snap.EndpointPosition) < 0.01f)
+                return;
+            Mesh bridgeMesh = RoadMeshBuilder.BuildBridge(ourEnd, ourTangent, snap.EndpointPosition, snap.Tangent, _roadWidth);
+            if (bridgeMesh == null) return;
+            CreateBridgeObject(bridgeMesh);
+        }
+
+        private static void GetEndpointAndTangent(IList<Vector3> path, Vector3 snapPoint, out Vector3 end, out Vector3 tangent)
+        {
+            float dStart = Vector3.Distance(path[0], snapPoint);
+            float dEnd = Vector3.Distance(path[path.Count - 1], snapPoint);
             if (dEnd <= dStart)
             {
                 int last = path.Count - 1;
-                ourEnd = path[last];
-                ourTangent = (last > 0 ? (path[last] - path[last - 1]).normalized : Vector3.forward);
+                end = path[last];
+                tangent = last > 0 ? (path[last] - path[last - 1]).normalized : Vector3.forward;
             }
             else
             {
-                ourEnd = path[0];
-                ourTangent = (path.Count > 1 ? (path[0] - path[1]).normalized : Vector3.forward);
+                end = path[0];
+                tangent = path.Count > 1 ? (path[0] - path[1]).normalized : Vector3.forward;
             }
+        }
 
-            // Don't build a bridge if our endpoint IS the snap point (already merged)
-            if (Vector3.Distance(ourEnd, snap.EndpointPosition) < 0.01f)
-                return;
-
-            Mesh bridgeMesh = RoadMeshBuilder.BuildBridge(
-                ourEnd, ourTangent,
-                snap.EndpointPosition, snap.Tangent,
-                _roadWidth);
-
-            if (bridgeMesh == null) return;
-
+        private void CreateBridgeObject(Mesh bridgeMesh)
+        {
             var go = new GameObject("BridgeMesh");
             go.transform.SetParent(transform);
             go.transform.localPosition = Vector3.zero;

@@ -5,25 +5,34 @@ namespace Tomciz.RoadGenerator
 {
     /// <summary>
     /// Builds a 2D plane mesh from a centerline path and road width.
-    /// Adds junction cap geometry at sharp turns / merge points to fill gaps.
+    /// Uses mitered corners at bends to avoid clipping; adds caps only for closed-loop paths.
     /// </summary>
     public static class RoadMeshBuilder
     {
         private static readonly Vector3 Up = Vector3.up;
-        private const float JunctionAngleThreshold = 0.95f; // cos(angle): below this we add a cap (stricter = more caps)
-        private const float ClosedPathDistanceThreshold = 2f; // path treated as closed when first-last distance below this (multiplied by width)
+        private const float JunctionAngleThreshold = 0.95f;
+        private const float ClosedPathDistanceThreshold = 2f;
+        private const float MiterLimit = 8f;
+        private const float Epsilon = 1e-6f;
 
         /// <summary>
         /// Builds a mesh from the centerline path. Road is a strip of quads in the XZ plane with given width.
         /// At interior points where the path bends sharply, adds a cap quad to close the gap.
+        /// UVs are length-based so the texture tiles along the road (no stretching). uvScaleAlong = world units per full UV repeat.
         /// </summary>
-        public static Mesh Build(IList<Vector3> path, float width)
+        public static Mesh Build(IList<Vector3> path, float width, float uvScaleAlong = 2f)
         {
             if (path == null || path.Count < 2)
                 return null;
 
             int n = path.Count;
             float halfWidth = width * 0.5f;
+            if (uvScaleAlong <= 0f) uvScaleAlong = 1f;
+
+            float[] lengthAt = new float[n];
+            lengthAt[0] = 0f;
+            for (int i = 1; i < n; i++)
+                lengthAt[i] = lengthAt[i - 1] + Vector3.Distance(path[i - 1], path[i]);
 
             var vertices = new List<Vector3>(n * 2);
             var uvs = new List<Vector2>(n * 2);
@@ -31,17 +40,13 @@ namespace Tomciz.RoadGenerator
 
             for (int i = 0; i < n; i++)
             {
-                Vector3 tangent = GetTangent(path, i, n);
-                Vector3 right = Vector3.Cross(Up, tangent).normalized;
-                if (right.sqrMagnitude < 0.0001f)
-                    right = Vector3.right;
+                Vector3 leftPt, rightPt;
+                GetMiteredOffset(path, n, i, halfWidth, out leftPt, out rightPt);
 
-                Vector3 left = path[i] - right * halfWidth;
-                Vector3 rightPt = path[i] + right * halfWidth;
-                vertices.Add(left);
+                vertices.Add(leftPt);
                 vertices.Add(rightPt);
 
-                float u = i / (float)(n - 1);
+                float u = lengthAt[i] / uvScaleAlong;
                 uvs.Add(new Vector2(u, 0f));
                 uvs.Add(new Vector2(u, 1f));
             }
@@ -60,8 +65,7 @@ namespace Tomciz.RoadGenerator
                 triangles.Add(d);
             }
 
-            AddJunctionCaps(path, width, vertices, uvs, triangles);
-            AddClosedLoopCapsIfNeeded(path, width, vertices, uvs, triangles);
+            AddClosedLoopCapsIfNeeded(path, width, lengthAt, uvScaleAlong, vertices, uvs, triangles);
 
             var mesh = new Mesh();
             mesh.name = "RoadMesh";
@@ -73,89 +77,39 @@ namespace Tomciz.RoadGenerator
             return mesh;
         }
 
-        private static void AddJunctionCaps(IList<Vector3> path, float width,
-            List<Vector3> vertices, List<Vector2> uvs, List<int> triangles)
-        {
-            int n = path.Count;
-            if (n < 3) return;
-            float halfWidth = width * 0.5f;
-
-            for (int i = 1; i < n - 1; i++)
-            {
-                Vector3 tangentIn = (path[i] - path[i - 1]).normalized;
-                Vector3 tangentOut = (path[i + 1] - path[i]).normalized;
-                float cosAngle = Vector3.Dot(tangentIn, tangentOut);
-                if (cosAngle >= JunctionAngleThreshold)
-                    continue;
-
-                Vector3 rightIn = Vector3.Cross(Up, tangentIn).normalized;
-                Vector3 rightOut = Vector3.Cross(Up, tangentOut).normalized;
-                if (rightIn.sqrMagnitude < 0.0001f) rightIn = Vector3.right;
-                if (rightOut.sqrMagnitude < 0.0001f) rightOut = Vector3.right;
-
-                Vector3 center = path[i];
-                Vector3 leftIn = center - rightIn * halfWidth;
-                Vector3 rightInPt = center + rightIn * halfWidth;
-                Vector3 leftOut = center - rightOut * halfWidth;
-                Vector3 rightOutPt = center + rightOut * halfWidth;
-
-                int o = vertices.Count;
-                vertices.Add(leftIn);
-                vertices.Add(rightInPt);
-                vertices.Add(rightOutPt);
-                vertices.Add(leftOut);
-                float u = i / (float)(n - 1);
-                uvs.Add(new Vector2(u, 0f));
-                uvs.Add(new Vector2(u, 1f));
-                uvs.Add(new Vector2(u, 1f));
-                uvs.Add(new Vector2(u, 0f));
-
-                triangles.Add(o);
-                triangles.Add(o + 1);
-                triangles.Add(o + 2);
-                triangles.Add(o);
-                triangles.Add(o + 2);
-                triangles.Add(o + 3);
-            }
-        }
-
         /// <summary>
         /// When the path forms a loop (first and last point close), add junction caps at both ends
         /// so the mesh closes without a gap.
         /// </summary>
-        private static void AddClosedLoopCapsIfNeeded(IList<Vector3> path, float width,
+        private static void AddClosedLoopCapsIfNeeded(IList<Vector3> path, float width, float[] lengthAt, float uvScaleAlong,
             List<Vector3> vertices, List<Vector2> uvs, List<int> triangles)
         {
             int n = path.Count;
-            if (n < 3) return;
+            if (n < 3 || lengthAt == null) return;
             float d = Vector3.Distance(path[0], path[n - 1]);
             if (d > width * ClosedPathDistanceThreshold)
                 return;
 
             float halfWidth = width * 0.5f;
+            float u0 = lengthAt[0] / uvScaleAlong;
+            float uN = lengthAt[n - 1] / uvScaleAlong;
 
-            // Cap at path[0]: tangentIn from last to first, tangentOut from first to second
             Vector3 tangentIn0 = (path[0] - path[n - 1]).normalized;
             Vector3 tangentOut0 = (path[1] - path[0]).normalized;
-            AddCapAtPoint(path[0], tangentIn0, tangentOut0, halfWidth, 0f, vertices, uvs, triangles);
+            AddCapAtPoint(path[0], tangentIn0, tangentOut0, halfWidth, u0, vertices, uvs, triangles);
 
-            // Cap at path[n-1]: tangentIn from second-last to last, tangentOut from last to first
             Vector3 tangentInN = (path[n - 1] - path[n - 2]).normalized;
             Vector3 tangentOutN = (path[0] - path[n - 1]).normalized;
-            AddCapAtPoint(path[n - 1], tangentInN, tangentOutN, halfWidth, (n - 1) / (float)(n - 1), vertices, uvs, triangles);
+            AddCapAtPoint(path[n - 1], tangentInN, tangentOutN, halfWidth, uN, vertices, uvs, triangles);
         }
 
         private static void AddCapAtPoint(Vector3 center, Vector3 tangentIn, Vector3 tangentOut,
             float halfWidth, float u, List<Vector3> vertices, List<Vector2> uvs, List<int> triangles)
         {
-            float cosAngle = Vector3.Dot(tangentIn, tangentOut);
-            if (cosAngle >= JunctionAngleThreshold)
+            if (Vector3.Dot(tangentIn, tangentOut) >= JunctionAngleThreshold)
                 return;
-
-            Vector3 rightIn = Vector3.Cross(Up, tangentIn).normalized;
-            Vector3 rightOut = Vector3.Cross(Up, tangentOut).normalized;
-            if (rightIn.sqrMagnitude < 0.0001f) rightIn = Vector3.right;
-            if (rightOut.sqrMagnitude < 0.0001f) rightOut = Vector3.right;
+            Vector3 rightIn = RightPerpXZ(tangentIn);
+            Vector3 rightOut = RightPerpXZ(tangentOut);
 
             Vector3 leftIn = center - rightIn * halfWidth;
             Vector3 rightInPt = center + rightIn * halfWidth;
@@ -188,6 +142,66 @@ namespace Tomciz.RoadGenerator
             return (path[index + 1] - path[index - 1]).normalized;
         }
 
+        private static Vector3 RightPerpXZ(Vector3 tangent)
+        {
+            var right = Vector3.Cross(Up, tangent).normalized;
+            return right.sqrMagnitude < 0.0001f ? Vector3.right : right;
+        }
+
+        /// <summary>
+        /// Computes left/right strip vertices at path[i] using mitered corners so the mesh
+        /// doesn't overlap or clip on the inside of bends. Endpoints use simple perpendicular offset.
+        /// </summary>
+        private static void GetMiteredOffset(IList<Vector3> path, int n, int i, float halfWidth,
+            out Vector3 leftPt, out Vector3 rightPt)
+        {
+            Vector3 tangent = GetTangent(path, i, n);
+            Vector3 right = RightPerpXZ(tangent);
+
+            if (n < 3 || i <= 0 || i >= n - 1)
+            {
+                leftPt = path[i] - right * halfWidth;
+                rightPt = path[i] + right * halfWidth;
+                return;
+            }
+
+            Vector3 tangentIn = (path[i] - path[i - 1]).normalized;
+            Vector3 tangentOut = (path[i + 1] - path[i]).normalized;
+            Vector3 rightIn = RightPerpXZ(tangentIn);
+            Vector3 rightOut = RightPerpXZ(tangentOut);
+
+            Vector3 center = path[i];
+            Vector3 pLeftIn = center - rightIn * halfWidth;
+            Vector3 pLeftOut = center - rightOut * halfWidth;
+            Vector3 pRightIn = center + rightIn * halfWidth;
+            Vector3 pRightOut = center + rightOut * halfWidth;
+
+            float limitSq = MiterLimit * MiterLimit * halfWidth * halfWidth;
+            if (!LineLineIntersectXZ(pLeftIn, tangentIn, pLeftOut, tangentOut, out leftPt) ||
+                (leftPt - center).sqrMagnitude > limitSq)
+                leftPt = center - right * halfWidth;
+            if (!LineLineIntersectXZ(pRightIn, tangentIn, pRightOut, tangentOut, out rightPt) ||
+                (rightPt - center).sqrMagnitude > limitSq)
+                rightPt = center + right * halfWidth;
+        }
+
+        /// <summary> 2D line-line intersection in XZ plane. Returns true if lines intersect. </summary>
+        private static bool LineLineIntersectXZ(Vector3 p0, Vector3 d0, Vector3 p1, Vector3 d1, out Vector3 result)
+        {
+            result = Vector3.zero;
+            float tx0 = d0.x, tz0 = d0.z;
+            float tx1 = d1.x, tz1 = d1.z;
+            float det = tx0 * tz1 - tz0 * tx1;
+            if (Mathf.Abs(det) < Epsilon) return false;
+
+            float dx = p1.x - p0.x, dz = p1.z - p0.z;
+            float t = (dx * tz1 - dz * tx1) / det;
+            float px = p0.x + t * tx0;
+            float pz = p0.z + t * tz0;
+            result = new Vector3(px, p0.y, pz);
+            return true;
+        }
+
         /// <summary>
         /// Builds a short curved mesh strip (Hermite interpolation) that bridges
         /// two road endpoints. The tangent directions ensure the bridge aligns
@@ -217,9 +231,7 @@ namespace Tomciz.RoadGenerator
                 Vector3 tangent = HermiteTangent(endA, m0, endB, m1, t).normalized;
                 if (tangent.sqrMagnitude < 0.0001f) tangent = Vector3.forward;
 
-                Vector3 right = Vector3.Cross(Up, tangent).normalized;
-                if (right.sqrMagnitude < 0.0001f) right = Vector3.right;
-
+                Vector3 right = RightPerpXZ(tangent);
                 vertices.Add(pos - right * halfWidth);
                 vertices.Add(pos + right * halfWidth);
 
