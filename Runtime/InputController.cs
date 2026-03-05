@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
 using System;
 
 namespace Tomciz.RoadGenerator
@@ -14,6 +15,11 @@ namespace Tomciz.RoadGenerator
 
         private bool _waitForRelease;
 
+        private static bool IsPointerOverUI()
+        {
+            return EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
+        }
+
         public void HandleMouseDrag()
         {
             if (IsDrawing)
@@ -27,6 +33,7 @@ namespace Tomciz.RoadGenerator
                 CurrentPosition = GetMouseWorldPosition();
                 if (Input.GetMouseButtonDown(0))
                 {
+                    if (IsPointerOverUI()) return;
                     EndPosition = CurrentPosition;
                     OnEndDrawing?.Invoke();
                     StartPosition = EndPosition;
@@ -35,6 +42,7 @@ namespace Tomciz.RoadGenerator
                 }
                 else if (Input.GetMouseButtonDown(1))
                 {
+                    if (IsPointerOverUI()) return;
                     EndPosition = CurrentPosition;
                     IsDrawing = false;
                     _waitForRelease = true;
@@ -48,6 +56,7 @@ namespace Tomciz.RoadGenerator
             }
             else if (Input.GetMouseButtonDown(0))
             {
+                if (IsPointerOverUI()) return;
                 StartPosition = CurrentPosition = GetMouseWorldPosition();
                 IsDrawing = true;
                 _waitForRelease = false;
