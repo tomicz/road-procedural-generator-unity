@@ -10,6 +10,9 @@ namespace Tomciz.RoadGenerator
         [SerializeField] private LineRenderer _lineRenderer;
         [SerializeField, FormerlySerializedAs("_bezierSegmentsPerKnot")]
         private int _segmentsPerSpan = 16;
+        [SerializeField, Min(0.01f)] private float _roadWidth = 2f;
+        [SerializeField] private MeshFilter _roadMeshFilter;
+        [SerializeField] private MeshRenderer _roadMeshRenderer;
 
         private InputController _inputController;
         private RoadSpline _spline;
@@ -29,6 +32,24 @@ namespace Tomciz.RoadGenerator
             _lineRenderer.positionCount = 0;
             _inputController = new InputController();
             _spline = new RoadSpline(_segmentsPerSpan);
+            EnsureRoadMeshExists();
+        }
+
+        private void EnsureRoadMeshExists()
+        {
+            if (_roadMeshFilter != null && _roadMeshRenderer != null)
+                return;
+            var go = new GameObject("RoadMesh");
+            go.transform.SetParent(transform);
+            go.transform.localPosition = Vector3.zero;
+            go.transform.localRotation = Quaternion.identity;
+            go.transform.localScale = Vector3.one;
+            if (_roadMeshFilter == null) _roadMeshFilter = go.AddComponent<MeshFilter>();
+            if (_roadMeshRenderer == null)
+            {
+                _roadMeshRenderer = go.AddComponent<MeshRenderer>();
+                _roadMeshRenderer.sharedMaterial = new Material(Shader.Find("Sprites/Default")) { color = new Color(0.3f, 0.3f, 0.3f) };
+            }
         }
 
         private void OnEnable()
@@ -73,8 +94,7 @@ namespace Tomciz.RoadGenerator
 
             bool isStrokeEnd = !_inputController.IsDrawing;
 
-            // Render the frozen committed road
-            SetLineRendererPositions(_committedPositions);
+            RefreshRoadDisplay(_committedPositions);
 
             if (isStrokeEnd)
             {
@@ -106,7 +126,8 @@ namespace Tomciz.RoadGenerator
                 return;
 
             List<Vector3> previewSegmentPositions = BuildPreviewSegmentPositions();
-            ApplyCommittedAndPreviewToLineRenderer(previewSegmentPositions);
+            List<Vector3> fullPath = BuildCommittedPlusPreviewPath(previewSegmentPositions);
+            RefreshRoadDisplay(fullPath);
         }
 
         private bool HasActiveStroke()
@@ -122,16 +143,22 @@ namespace Tomciz.RoadGenerator
             return _spline.SampleSegment(previewKnots, previewSmooth, previewSegIndex);
         }
 
-        private void ApplyCommittedAndPreviewToLineRenderer(List<Vector3> previewSegmentPositions)
+        private List<Vector3> BuildCommittedPlusPreviewPath(List<Vector3> previewSegmentPositions)
         {
             int committedCount = _committedPositions.Count;
             int total = committedCount + previewSegmentPositions.Count - 1;
-            _lineRenderer.positionCount = total;
-
+            var path = new List<Vector3>(total);
             for (int i = 0; i < committedCount; i++)
-                _lineRenderer.SetPosition(i, _committedPositions[i]);
+                path.Add(_committedPositions[i]);
             for (int i = 1; i < previewSegmentPositions.Count; i++)
-                _lineRenderer.SetPosition(committedCount + i - 1, previewSegmentPositions[i]);
+                path.Add(previewSegmentPositions[i]);
+            return path;
+        }
+
+        private void RefreshRoadDisplay(List<Vector3> path)
+        {
+            SetLineRendererPositions(path);
+            UpdateRoadMesh(path);
         }
 
         private void SetLineRendererPositions(List<Vector3> positions)
@@ -139,6 +166,15 @@ namespace Tomciz.RoadGenerator
             _lineRenderer.positionCount = positions.Count;
             for (int i = 0; i < positions.Count; i++)
                 _lineRenderer.SetPosition(i, positions[i]);
+        }
+
+        private void UpdateRoadMesh(List<Vector3> path)
+        {
+            if (_roadMeshFilter == null)
+                return;
+            Mesh mesh = RoadMeshBuilder.Build(path, _roadWidth);
+            if (mesh != null)
+                _roadMeshFilter.mesh = mesh;
         }
 
     }
