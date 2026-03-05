@@ -79,6 +79,18 @@ namespace Tomciz.RoadGenerator
 
         private void OnEndDrawing()
         {
+            bool isStrokeEnd = !_inputController.IsDrawing;
+
+            if (isStrokeEnd)
+            {
+                RefreshRoadDisplay(_committedPositions ?? new List<Vector3>());
+                _roadKnots = null;
+                _segmentSmooth = null;
+                _committedPositions = null;
+                _strokeEnded = true;
+                return;
+            }
+
             _roadKnots ??= new List<Vector3>();
             _segmentSmooth ??= new List<bool>();
             _committedPositions ??= new List<Vector3>();
@@ -86,23 +98,12 @@ namespace Tomciz.RoadGenerator
             _roadKnots.Add(_inputController.EndPosition);
             _segmentSmooth.Add(_useBezierCurve);
 
-            // Freeze the new segment: compute its positions and append to committed
             int newSegIndex = _roadKnots.Count - 2;
             var segPositions = _spline.SampleSegment(_roadKnots, _segmentSmooth, newSegIndex);
             for (int i = 1; i < segPositions.Count; i++)
                 _committedPositions.Add(segPositions[i]);
 
-            bool isStrokeEnd = !_inputController.IsDrawing;
-
             RefreshRoadDisplay(_committedPositions);
-
-            if (isStrokeEnd)
-            {
-                _roadKnots = null;
-                _segmentSmooth = null;
-                _committedPositions = null;
-                _strokeEnded = true;
-            }
         }
 
         private void LateUpdate()
