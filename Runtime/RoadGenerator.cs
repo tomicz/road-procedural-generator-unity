@@ -12,6 +12,7 @@ namespace Tomciz.RoadGenerator
         private int _segmentsPerSpan = 16;
 
         private InputController _inputController;
+        private RoadSpline _spline;
         private List<Vector3> _roadKnots;
         private List<bool> _segmentSmooth;
         private List<Vector3> _committedPositions;
@@ -21,13 +22,13 @@ namespace Tomciz.RoadGenerator
         public void SetUseBezier(bool useBezier)
         {
             _useBezierCurve = useBezier;
-            Debug.Log($"[Mode] {(useBezier ? "Smooth" : "Linear")}");
         }
 
         private void Awake()
         {
             _lineRenderer.positionCount = 0;
             _inputController = new InputController();
+            _spline = new RoadSpline(_segmentsPerSpan);
         }
 
         private void OnEnable()
@@ -66,7 +67,7 @@ namespace Tomciz.RoadGenerator
 
             // Freeze the new segment: compute its positions and append to committed
             int newSegIndex = _roadKnots.Count - 2;
-            var segPositions = SampleSegment(_roadKnots, _segmentSmooth, newSegIndex);
+            var segPositions = _spline.SampleSegment(_roadKnots, _segmentSmooth, newSegIndex);
             for (int i = 1; i < segPositions.Count; i++)
                 _committedPositions.Add(segPositions[i]);
 
@@ -86,33 +87,51 @@ namespace Tomciz.RoadGenerator
 
         private void LateUpdate()
         {
-            _inputController.HandleMouseDrag();
+            ProcessInput();
         }
 
         private void Update()
         {
-            if (_roadKnots == null || _roadKnots.Count == 0 || !_inputController.IsDrawing)
+            RefreshLineDisplay();
+        }
+
+        private void ProcessInput()
+        {
+            _inputController.HandleMouseDrag();
+        }
+
+        private void RefreshLineDisplay()
+        {
+            if (!HasActiveStroke())
                 return;
 
-            // Build a temporary knot list to compute only the preview segment
-            var previewKnots = new List<Vector3>(_roadKnots);
-            previewKnots.Add(_inputController.CurrentPosition);
+            List<Vector3> previewSegmentPositions = BuildPreviewSegmentPositions();
+            ApplyCommittedAndPreviewToLineRenderer(previewSegmentPositions);
+        }
 
-            var previewSmooth = new List<bool>(_segmentSmooth);
-            previewSmooth.Add(_useBezierCurve);
+        private bool HasActiveStroke()
+        {
+            return _roadKnots != null && _roadKnots.Count > 0 && _inputController.IsDrawing;
+        }
 
+        private List<Vector3> BuildPreviewSegmentPositions()
+        {
+            var previewKnots = new List<Vector3>(_roadKnots) { _inputController.CurrentPosition };
+            var previewSmooth = new List<bool>(_segmentSmooth) { _useBezierCurve };
             int previewSegIndex = previewKnots.Count - 2;
-            var previewPositions = SampleSegment(previewKnots, previewSmooth, previewSegIndex);
+            return _spline.SampleSegment(previewKnots, previewSmooth, previewSegIndex);
+        }
 
-            // Display: frozen committed positions + live preview segment
+        private void ApplyCommittedAndPreviewToLineRenderer(List<Vector3> previewSegmentPositions)
+        {
             int committedCount = _committedPositions.Count;
-            int total = committedCount + previewPositions.Count - 1;
+            int total = committedCount + previewSegmentPositions.Count - 1;
             _lineRenderer.positionCount = total;
 
             for (int i = 0; i < committedCount; i++)
                 _lineRenderer.SetPosition(i, _committedPositions[i]);
-            for (int i = 1; i < previewPositions.Count; i++)
-                _lineRenderer.SetPosition(committedCount + i - 1, previewPositions[i]);
+            for (int i = 1; i < previewSegmentPositions.Count; i++)
+                _lineRenderer.SetPosition(committedCount + i - 1, previewSegmentPositions[i]);
         }
 
         private void SetLineRendererPositions(List<Vector3> positions)
@@ -122,42 +141,5 @@ namespace Tomciz.RoadGenerator
                 _lineRenderer.SetPosition(i, positions[i]);
         }
 
-        private List<Vector3> SampleSegment(List<Vector3> knots, List<bool> smooth, int segIndex)
-        {
-            Vector3 p1 = knots[segIndex];
-            Vector3 p2 = knots[segIndex + 1];
-
-            if (!smooth[segIndex])
-                return new List<Vector3> { p1, p2 };
-
-            // Catmull-Rom needs the points before and after the segment.
-            // At boundaries, use phantom points (reflection across the endpoint).
-            Vector3 p0 = segIndex > 0 ? knots[segIndex - 1] : 2f * p1 - p2;
-            Vector3 p3 = segIndex + 2 < knots.Count ? knots[segIndex + 2] : 2f * p2 - p1;
-
-            var result = new List<Vector3>();
-            for (int s = 0; s <= _segmentsPerSpan; s++)
-            {
-                float t = s / (float)_segmentsPerSpan;
-                result.Add(CatmullRom(p0, p1, p2, p3, t));
-            }
-            return result;
-        }
-
-        /// <summary>
-        /// Standard Catmull-Rom interpolation between p1 and p2,
-        /// using p0 and p3 as neighboring influence points.
-        /// </summary>
-        private static Vector3 CatmullRom(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
-        {
-            float t2 = t * t;
-            float t3 = t2 * t;
-            return 0.5f * (
-                2f * p1 +
-                (-p0 + p2) * t +
-                (2f * p0 - 5f * p1 + 4f * p2 - p3) * t2 +
-                (-p0 + 3f * p1 - 3f * p2 + p3) * t3
-            );
-        }
     }
 }

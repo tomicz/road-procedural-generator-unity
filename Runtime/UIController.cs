@@ -16,14 +16,12 @@ namespace Tomciz.RoadGenerator
 
         private void OnButtonEnableBezierClick()
         {
-            Debug.Log("[UI] Bezier clicked");
             if (_roadGenerator != null)
                 _roadGenerator.SetUseBezier(true);
         }
 
         private void OnButtonEnableLinearClick()
         {
-            Debug.Log("[UI] Linear clicked");
             if (_roadGenerator != null)
                 _roadGenerator.SetUseBezier(false);
         }
